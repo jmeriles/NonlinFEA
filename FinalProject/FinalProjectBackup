@@ -1,0 +1,809 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from numpy.linalg import *
+from scipy.special import p_roots
+from scipy.optimize import fsolve
+from tqdm import tqdm
+
+from matplotlib import cm
+from matplotlib.patches import Polygon
+from matplotlib.patches import Rectangle
+from matplotlib.collections import PatchCollection
+
+import warnings
+import sys
+
+class mesh:
+    def __init__(self, numel_L, numel_W):
+        # mesh dimensions and array shapes
+        self.numel_L = numel_L
+        self.numel_W = numel_W
+        self.numel = self.numel_L * self.numel_W
+        self.numnp = (self.numel_L + 1) * (self.numel_W + 1)
+        self.ndf = 2
+        self.nen = 4 # quadrilaterial elements
+        
+        # physical dimensions
+        self.L = 1 # [m]
+        self.W = 0.2 # [m]
+        
+        # Jacobian quantities for reference configuration
+        self.hx = self.L / self.numel_L
+        self.hy = self.W / self.numel_W
+        
+        # connectivity matrices
+        self.ID = self.__generate_ID()
+        self.IX = self.__generate_IX()
+        self.LM = self.__generate_LM()
+        
+        # generate nodal points
+        self.Xb = self.__generate_Xb()
+        self.Xhat = self.Xb.flatten() # fixed dofs for reference configuration
+        
+        # mask for boundary conditions and Lagrange multipliers
+        self.rhs_nodes, self.interior_nodes = self.__generate_bc_masks()
+        self.rhs_dofs = self.ID[:,self.rhs_nodes]
+        self.interior_dofs = self.ID[:,self.interior_nodes]
+        self.interior_x_dofs = self.interior_dofs[0,:]; self.interior_y_dofs = self.interior_dofs[1,:]
+        
+        return
+    
+    '''
+    Mesh generation
+    '''
+    # global dof number as a function of global node number
+    def __generate_ID(self):
+        return np.arange(0, self.numnp*self.ndf).reshape(self.numnp, self.ndf).T
+    
+    # global node number as a function of element number and local node number
+    def __generate_IX(self):
+        IX = np.zeros((self.nen, self.numel), dtype=int)
+        for i in range(0, self.numel_W):
+            for j in range(0, self.numel_L):
+                el = i*self.numel_L + j
+                bottom_left = i*(self.numel_L + 1) + j
+                IX[0,el] = bottom_left
+                IX[1,el] = bottom_left + 1
+                IX[2,el] = bottom_left + (self.numel_L + 1) + 1
+                IX[3,el] = bottom_left + (self.numel_L + 1)
+        
+        return IX
+    
+    # global dof number as a function of local dof number and element number
+    def __generate_LM(self):
+        return np.vstack([np.hstack([self.ID[:,node] for node in self.IX[:,el]]) for el in range(0,self.numel)]).T
+    
+    # coordinates of the nodes in the reference configuration
+    def __generate_Xb(self):
+        X1 = np.linspace(0., self.L, self.numel_L + 1)
+        X2 = np.linspace(0., self.W, self.numel_W + 1)
+        XX, YY = np.meshgrid(X1, X2)
+        return np.vstack([XX.flatten(), YY.flatten()]).T
+    
+    # masks for boundary conditions
+    def __generate_bc_masks(self):
+        rhs = np.array([self.numel_L + (self.numel_L + 1)*i for i in range(0,(self.numel_W + 1))])
+        interior = np.array([j + (self.numel_L + 1)*i for i in range(0,(self.numel_W + 1)) for j in range(0, self.numel_L)])
+        
+        return rhs, interior
+    
+    '''
+    Plotting functions
+    '''
+    # plot current state of mesh
+    def plot_unde(self, node_numbers=False, element_numbers=False, label_vertex=False):
+        # box of mesh
+        x = self.Xb[:,0]; y = self.Xb[:,1]
+        xmin = np.min(x); xmax = np.max(x)
+        ymin = np.min(y); ymax = np.max(y)
+        
+        # create figure
+        fig = plt.figure()
+        ax = fig.add_subplot()
+        
+        # loop through elements
+        patches = []
+        for col in self.IX.T:
+            verts = [(x[i], y[i]) for i in col]
+            poly = Polygon(verts)
+            patches.append(poly)
+
+        # plot elements
+        p = PatchCollection(patches, alpha=1, fc = 'w', ec='k', linewidth=1.5)
+        ax.add_collection(p)
+        
+        # label vertices
+        buffer = xmax/25
+        if node_numbers:
+            shift = np.array([buffer/4, -buffer/4])
+            for i, (xi,yi) in enumerate(zip(x, y)):
+                ax.text(xi + shift[0], yi + shift[1], str(i + 0), fontsize=10,
+#                        bbox=dict(facecolor='none', edgecolor='blue', boxstyle='round'),
+                       ha='center', va='center')
+        
+        # label element numbers
+        if element_numbers:
+            for i,el in enumerate(self.IX.T):
+                xi = np.mean(x[el]); yi = np.mean(y[el])
+                ax.text(xi, yi, str(i + 0), fontsize=10,
+                       bbox=dict(facecolor='none', edgecolor='red', pad=2.0),
+                       ha='center', va='center')
+        
+        # add vertices
+        if label_vertex:
+            ax.plot(x, y, 'bo')
+            ax.plot(x[self.rhs_nodes], y[self.rhs_nodes], 'go')
+
+        # plot attributes
+        ax.set_xlim([xmin - buffer, xmax + buffer])
+        ax.set_ylim([ymin - buffer, ymax + buffer])
+        ax.set_xlabel(r"$x$")
+        ax.set_ylabel(r"$y$")
+class spatial_FEmesh(mesh):
+    def __init__(self, numel_L, numel_W, gauss_ord=2, dt=1e-3, check_PSD=False):
+        super().__init__(numel_L, numel_W) # inherit from parent class
+        
+        # solution parameters
+        self.dt = dt # [s]
+        # implicit Newmark parameters
+        self.beta = 0.25
+        self.gamma = 0.5 
+        # Kirchoff-Saint Venant material parameters
+        self.rho0 = 1e-2 # [10^6 kg/m^2]
+        self.lam = 100 # [MPa]
+        self.mu = 40 # [MPa]
+        
+        # wall offset
+        self.wall_offset = .1 # [m]
+        
+        # track current time
+        self.t = 0. # [s]
+        
+        # quantities for element integration
+        self.gps = self.get_gps(gauss_ord=gauss_ord)
+        
+        # Jacobian back to natural coordinates
+        self.J_nat = self.hx*self.hy
+        self.F_nat = np.array([
+            [1./self.hx, 0.],
+            [0., 1./self.hy]
+        ])
+        
+        # store basis function evaluations at Gauss points
+        self.Be_Gauss = [self.Be(xi, eta) for (xi,eta,w) in self.gps]
+        self.Ne_Gauss = [self.Ne(xi, eta) for (xi,eta,w) in self.gps]
+        
+        # store current values of degrees of freedom
+        self.uhat = np.zeros((self.ndf*self.numnp), dtype=float) # initialize dofs
+        self.vhat = np.zeros_like(self.uhat, dtype=float)
+        self.ahat = np.zeros_like(self.uhat, dtype=float)
+        self.Lhat = np.zeros(self.numel_W + 1, dtype=float) # Lagrange multipliers
+        
+        # store one time step behind for residual calculation
+        self.un = np.zeros_like(self.uhat, dtype=float)
+        self.vn = np.zeros_like(self.uhat, dtype=float)
+        self.an = np.zeros_like(self.uhat, dtype=float)
+        
+        self.Tmax = np.zeros((2,2), dtype=float)
+        
+        # assembled matrices that are constant in time
+        self.M = self.assemble_M() # diagonal of the mass matrix
+        # self.Ki = self.assemble_Ki()
+        self.Ki = np.diag(self.M) * 1./(self.beta*self.dt*self.dt)
+        
+        # extended system for constraint
+        self.d = self.assemble_d()
+        self.extended_zero = np.zeros((self.numel_W + 1, self.numel_W + 1), dtype=float)
+        self.contact = [False for _ in range(0, self.numel_W + 1)]
+        
+        return
+    
+    '''
+    helper functions
+    '''
+    # retrieves Gauss points of desired order
+    def get_gps(self, gauss_ord=2):
+        # find Gauss points in [-1, 1] x [1, 1] domain
+        [gps,ws] = p_roots(gauss_ord)
+        # transform to [0, 1] x [0, 1]
+        gps = 0.5*gps + 0.5*(1 - 0)
+        ws = ws*0.5
+        # stack as 2D
+        gpw = np.array([[xi,eta,w_xi*w_eta] for (xi,w_xi) in zip(gps,ws) for eta,w_eta in zip(gps,ws)])
+        
+        return gpw
+    
+    # convention for forming the <\frac{\partial S}{\partial E}> array
+    def flatten_tensor(self, c):
+        c_flat = np.zeros((self.ndf*self.ndf, self.ndf*self.ndf), dtype=float)
+        flat_conv = [(0,0), (1,1), (0,1), (1,0)]
+        for I, (i,j) in enumerate(flat_conv):
+            for J, (k,l) in enumerate(flat_conv):
+                c_flat[I,J] = c[i,j,k,l]
+
+        return c_flat
+    
+    '''
+    shape functions and its derivatives
+    '''
+    # list of basis function evaluations at each node in [0,1] x [0,1] domain
+    @staticmethod
+    def Nei(xi, eta):
+        # quadrilateral element
+        return np.array([(1 - xi)*(1 - eta), xi*(1 - eta), xi*eta, eta*(1 - xi)])
+    
+    # array of shape functions for computing the elemental mass matrix
+    def Ne(self, xi, eta):
+        return np.hstack([N*np.identity(self.ndf) for N in self.Nei(xi,eta)])
+    
+    # gradient of shape function array
+    @staticmethod
+    def dNei_dXA(xi, eta):
+        return np.array([
+            [(eta - 1), (xi - 1)],
+            [-(eta - 1), -xi],
+            [eta, xi],
+            [-eta, -(xi - 1)]
+            ])
+    # tensor divergence array
+    def Be(self, xi, eta):
+        return np.hstack([np.array([
+            [dNi[0], 0],
+            [0, dNi[1]],
+            [dNi[1], 0],
+            [0, dNi[0]],
+            ]) @ self.F_nat.T for dNi in self.dNei_dXA(xi, eta)])
+    
+    # isoparametric mapping to current configuration as a function of natural coordinates
+    def xb(self, xi, eta, el):
+        return self.Ne(xi, eta) @ (self.uhat[self.LM[:,el]] + self.Xhat[self.LM[:,el]])
+    
+    # deformation gradient
+    def F(self, xi, eta, el, pert=0):
+        u = (self.uhat[self.LM[:,el]] + pert).reshape(4,2)
+        F11 = 1+(u[1,0]+u[0,0]*(eta-1)-(u[1,0]-u[2,0]+u[3,0])*eta)/self.hx
+        F12 = (u[3,0]+u[0,0]*(xi-1)-(u[1,0]-u[2,0]+u[3,0])*xi)/self.hy
+        F21 = (u[1,1]+u[0,1]*(eta-1)-(u[1,1]-u[2,1]+u[3,1])*eta)/self.hx
+        F22 = 1+(u[3,1]+u[0,1]*(xi-1)-(u[1,1]-u[2,1]+u[3,1])*xi)/self.hy
+        return np.array([
+            [F11, F12],
+            [F21, F22]
+        ])
+    
+    # Lagrangian strain tensor
+    def E(self, F):
+        return 0.5*((F.T @ F) - np.eye(2))
+    
+    '''
+    constitutive relations
+    '''
+    # Kirchoff-Saint Venant material constitutive relation
+    def S(self, E):
+        return 2*self.mu*E + self.lam*np.trace(E)*np.eye(2)
+    
+    # numerical differentiation of P
+    def dSdE_numerical(self, E):
+        # finite difference scheme
+        dSdE = np.zeros((self.ndf, self.ndf, self.ndf, self.ndf), dtype=float)
+        S = self.S(E)
+        eps = np.finfo(float).eps # machine epsilon
+        omega = 1.5*np.sqrt(eps)*np.ones_like(E, dtype=float)
+        Epert = np.maximum(omega, np.abs(E)*omega)
+        for i in range(0, self.ndf):
+            for j in range(0, self.ndf):
+                h = Epert[i,j]
+                Estar = np.copy(E); Estar[i,j] += h
+                Estar = 0.5*(Estar + Estar.T) # perturbation must be symmetric
+                dSdE[:,:,i,j] = (self.S(Estar) - S) / h
+
+        return dSdE
+    
+    # analytical derivative of P with respect to F
+    def dSdE_analytic(self, E):
+        # analytical derivative
+        term1 = np.einsum('AC,BD->ABCD', np.eye(2), np.eye(2))
+        term2 = np.einsum('AD,BC->ABCD', np.eye(2), np.eye(2))
+        term3 = np.einsum('AB,CD->ABCD', np.eye(2), np.eye(2))
+        
+        return self.mu*(term1 + term2) + self.lam*term3
+    
+    # strain energy
+    def strain_energy(self, F):
+        F = np.pad(F, [0,1]); F[-1,-1] = 1.; # embed in 3D space
+        C = F.T @ F
+        IC = np.trace(C)
+        IIC = 0.5*(IC*IC - np.trace(C@C))
+        
+        return 1./8.*self.lam*(IC - 3)*(IC - 3) + 0.25*self.mu*(IC*IC - 2*IC - 2*IIC + 3)
+    
+    '''
+    elemental matrices
+    '''
+    # Mass matrix
+    def Me(self):
+        Me = np.zeros((self.ndf*self.nen, self.ndf*self.nen), dtype=float)
+        for xi,eta,w in self.gps:
+            N = self.Ne(xi,eta)
+            Me += w * self.rho0 * (N.T @ N)
+        
+        return Me*self.hx*self.hy
+    # Diagonal of mass matrix computed using nodal quadrature
+    def Me_Nodal(self):
+        Me = np.zeros((self.ndf*self.nen, self.ndf*self.nen), dtype=float)
+        # nodal quadrature
+        node_nps = np.array([
+            [0., 0., 0.25],
+            [1., 0., 0.25],
+            [1., 1., 0.25],
+            [0., 1., 0.25]
+            ])
+        for xi,eta,w in node_nps:
+            N = self.Ne(xi,eta)
+            Me += w * self.rho0 * (N.T @ N)
+        
+        return np.diag(Me*self.hx*self.hy)
+    
+    # element stress-divergence vector
+    def Re(self, el):
+        Re = np.zeros((self.ndf*self.nen), dtype=float)
+        for (xi,eta,w), Be in zip(self.gps,self.Be_Gauss):
+            F = self.F(xi, eta, el)
+            Re += w * (Be.T @ positive_flatten(F @ self.S(self.E(F))) )
+        
+        return Re * self.J_nat
+    
+    # elemental intertial stiffness matrix
+    def Ke_inertial(self):
+        Ke = np.zeros((self.ndf*self.nen, self.ndf*self.nen), dtype=float)
+        for (xi,eta,w), Ne in zip(self.gps,self.Ne_Gauss):
+            Ke += w * (self.rho0/(self.beta*self.dt*self.dt)) * (Ne.T @ Ne)
+        
+        return Ke * self.hx*self.hy
+    
+    # elemental material stiffness matrix
+    def Ke_material(self, el):
+        Kem = np.zeros((self.ndf*self.nen, self.ndf*self.nen), dtype=float)
+        
+        for (xi,eta,w), Be in zip(self.gps, self.Be_Gauss):
+            # compute deformation gradient
+            F = self.F(xi,eta,el)
+            E = self.E(F)
+            
+            # material stiffness
+            c = np.einsum('iA,ABCD,jC->iBjD', F, self.dSdE_analytic(E), F)
+            #print(self.flatten_tensor(c))
+            Kem += w * Be.T @ self.flatten_tensor(c) @ Be
+        
+        return Kem * self.hx*self.hy
+    
+    # elemental geometric stiffness matrix
+    def Ke_geometric(self, el):
+        Keg = np.zeros((self.ndf*self.nen, self.ndf*self.nen), dtype=float)
+        
+        # helper function for Be convention
+        def Ae(T):
+            return np.array([
+                [T[0,0], 0, T[1,0], 0],
+                [0, T[1,1], 0, T[0,1]],
+                [T[0,1], 0, T[1,1], 0],
+                [0, T[1,0], 0, T[0,0]]
+            ])
+        
+        # loop over Gauss points
+        for (xi,eta,w), Be in zip(self.gps, self.Be_Gauss):
+            # compute deformation gradient
+            F = self.F(xi,eta,el)
+            
+            # geometric stiffness
+            Keg += w * Be.T @ Ae(self.S(self.E(F))).T @ Be
+        
+        return Keg * self.hx*self.hy
+    
+    '''
+    Assembly
+    '''
+    # global (nodal) mass vector
+    def assemble_M(self):
+        M = np.zeros((self.ndf*self.numnp), dtype=float) # diagonal mass matrix
+        for el in range(0, self.numel):
+            M[self.LM[:,el]] += self.Me_Nodal()
+        
+        return M
+    
+    # global stress-divergence vector
+    def R(self):
+        R = np.zeros_like(self.uhat)
+        for el in range(0, self.numel):
+            R[self.LM[:,el]] += self.Re(el)
+        
+        return R
+    
+    # global inertial stiffness matrix
+    def assemble_Ki(self):
+        K = np.zeros((self.ndf*self.numnp, self.ndf*self.numnp), dtype=float)
+        for el in range(0, self.numel):
+            Kei = self.Ke_inertial()
+            for i in range(0, self.ndf*self.nen):
+                for j in range(0, self.ndf*self.nen):
+                    K[self.LM[i,el], self.LM[j,el]] += Kei[i,j]
+        
+        return K
+    
+    # global geometric stiffness matrix
+    def assemble_Kg(self):
+        K = np.zeros((self.ndf*self.numnp, self.ndf*self.numnp), dtype=float)
+        for el in range(0, self.numel):
+            Kei = self.Ke_geometric(el)
+            for i in range(0, self.ndf*self.nen):
+                for j in range(0, self.ndf*self.nen):
+                    K[self.LM[i,el], self.LM[j,el]] += Kei[i,j]
+        
+        return K
+    
+    # global material stiffness matrix
+    def assemble_Km(self):
+        K = np.zeros((self.ndf*self.numnp, self.ndf*self.numnp), dtype=float)
+        for el in range(0, self.numel):
+            Kei = self.Ke_material(el)
+            for i in range(0, self.ndf*self.nen):
+                for j in range(0, self.ndf*self.nen):
+                    K[self.LM[i,el], self.LM[j,el]] += Kei[i,j]
+        
+        return K
+    
+    '''
+    Computational Constraints
+    '''
+    # gap function
+    def g(self):
+        x = self.Xb[self.rhs_nodes,0] + self.uhat[self.rhs_dofs[0]]
+        xf = np.ones_like(x)*self.wall_offset + self.L
+        
+        return xf - x
+    
+    # differential of constraint vector
+    def assemble_d(self):
+        # evaluate gap
+        gap = self.g()
+        # assemble differential
+        Dc = np.zeros((self.numel_W + 1, self.ndf*self.numnp), dtype=float)
+        for i,j in enumerate(self.rhs_dofs[0]):
+            Dc[i,j] = 1.
+        
+        return Dc.T
+    
+    # determine whether the beam is in contact with the wall
+    def in_contact(self):
+        zero_tol = 1e-10*self.L
+        gap = self.g()
+        cond1 = gap < zero_tol
+        cond2 = np.logical_and(self.g() < zero_tol, self.Lhat > 0)
+        return np.logical_or(cond1, cond2)
+    
+    # determine whether the beam is in contact with the wall
+    def update_contact(self):
+        zero_tol = 1e-10
+        gap = self.g()
+        # loop through leading edge nodes
+        for j in range(0, self.numel_W + 1):
+            if (self.contact[j] == False) and (gap[j] < zero_tol):
+                # activate contact condition
+                self.contact[j] = True
+                # zero out velocity
+                dof = self.rhs_dofs[0,j]
+                self.un[dof] += gap[j]
+#                 self.uhat[dof] += gap[j]
+                self.vn[dof] = 0.
+                self.vhat[dof] = 0.
+                self.an[dof] = 0.
+                self.ahat[dof] = 0.
+                # go back a timestep
+#                 self.uhat = np.copy(self.un)
+#                 self.vhat = np.copy(self.vn)
+#                 self.ahat = np.copy(self.an)
+#                 self.t -= self.dt
+            if (self.contact[j] == True) and (self.Lhat[j] < 0):
+                self.contact[j] = False
+        return
+    
+    '''
+    Equation solving
+    '''
+    # residual
+    def f(self):
+        return self.M*self.ahat + self.R()
+        # constants in Newmark integration
+#         c1 = 1./(self.beta*self.dt*self.dt)
+#         c2 = (1-2*self.beta)/(2*self.beta)
+#         return self.M*(c1*(self.uhat-self.un-self.vn*self.dt)-c2*self.an) + self.R()
+    
+    # form extended system
+    def extended_solve(self):
+        # contact condition
+        d = np.copy(self.d)
+        dT = np.copy(d.T)
+        g = self.g()
+        zero = np.copy(self.extended_zero)
+#         self.update_contact()
+#         self.contact = self.in_contact()
+        print(g)
+        for j,(dof,c) in enumerate(zip(self.rhs_dofs[0], self.contact)):
+            if c:
+#                 pass
+                self.vn[dof] = 0.
+                self.vhat[dof] = 0.
+                self.an[dof] = 0.
+                self.ahat[dof] = 0.
+            else:
+                # turn off Lagrange multipliers
+                self.Lhat[j] = 0
+                dT[j,:] = 0.
+                zero[j,j] = 1.
+                g[j] = 0.
+        
+        # assemble stiffness matrix
+        K = self.Ki + self.assemble_Km() + self.assemble_Kg()
+        # contact condition
+#         d = self.d
+#         for i in range(0, self.numel_W + 1):
+#             if not((gap[i] < 0) or (-self.Lhat[i] > 0)):
+#                 d[:,i] = 0.
+        # assemble extended system
+        A = np.block([
+            [K, d],
+            [dT, zero]
+        ])
+        b = -np.hstack([self.f() + d @ self.Lhat, g])
+        # turn off Lagrange multipliers if not in contact
+#         for i,(dof,c) in enumerate(zip(self.rhs_dofs[0], self.in_contact())):
+#             if c:
+#                 pass
+#             else:
+#                 row = -(self.numel_W + 1) + i
+#                 A[row,row] = 0; A[row,row] = 1; b[row] = 0.
+#                 self.Lhat[i] = 0.; # zero out force
+#         gap = self.g()
+#         zero_tol = 1e-10
+#         for i in range(0, self.numel_W + 1):
+# #             if not((gap[i] < zero_tol) or (self.Lhat[i] > -zero_tol)):
+#             if (gap[i] > zero_tol) or (self.Lhat[i] < -zero_tol): # no contact
+#                 row = -(self.numel_W + 1) + i
+#                 A[row,row] = 0; A[row,row] = 1; b[row] = 0.
+#                 self.Lhat[i] = 0.; # zero out force
+#             else:
+#                 pass
+        # solve extended system
+        duL = solve(A,b)
+        du, dL = np.split(duL, [self.ndf*self.numnp])
+        
+        return du, dL, A
+        
+    # Newton-Raphson iteration
+    def NR(self):
+        
+        return
+    
+    # total energy
+    def total_energy(self):
+        e = 0.
+        # add element by element
+        for el in range(0, self.numel):
+            for (xi,eta,w),Ne in zip(self.gps,self.Ne_Gauss):
+                # add strain energy
+                F = self.F(xi,eta,el)
+                e += w * self.strain_energy(F) * self.J_nat
+                # add kinetic energy
+                v = Ne @ self.vhat[self.LM[:,el]] # interpolate velocity at Gauss point
+                e += w * 0.5*self.rho0*np.dot(v,v) * self.J_nat
+        
+        return e
+    
+    '''
+    Plotting functions
+    '''
+    # plot current state of mesh
+    def plot_defo(self, node_numbers=False, label_vertex=False, show_acc=False, show_reac=False):
+        # box of mesh
+        X = self.Xb[:,0]; Y = self.Xb[:,1]
+        x = X + self.uhat[self.ID[0,:]]; y = Y + self.uhat[self.ID[1,:]]
+        xmin = np.min(x); xmax = np.max(x)
+        ymin = np.min(y); ymax = np.max(y)
+        
+        # create figure
+        fig = plt.figure()
+        ax = fig.add_subplot()
+        
+        # loop through elements
+        patches = []
+        for col in self.IX.T:
+            verts = [(x[i], y[i]) for i in col]
+            poly = Polygon(verts)
+            patches.append(poly)
+
+        # plot elements
+        p = PatchCollection(patches, alpha=1, fc = 'w', ec='k', linewidth=1.5)
+        els = ax.add_collection(p)
+        
+        # compute Cauchy stress in each element
+        Ts = np.zeros((self.numel, self.ndf, self.ndf), dtype=float)
+        for el in range(0, self.numel):
+            Fmid = self.F(0.5, 0.5, el)
+            Tmid = (Fmid @ self.S(self.E(Fmid)) @ Fmid.T) / det(Fmid)
+            Ts[el,:,:] = Tmid
+            self.Tmax = np.max([self.Tmax, Tmid], axis=0)
+        p.set_array(Ts[:,0,0])
+        
+        # plot wall
+        rect = Rectangle((self.wall_offset+self.L, -self.W/2), 0.1, self.W*2, linewidth=1, edgecolor='r', facecolor='none')
+        ax.add_patch(rect)
+        
+        # add vertices
+        if label_vertex:
+            ax.plot(x, y, 'bo')
+            ax.plot(x[self.rhs_nodes], y[self.rhs_nodes], 'go')
+        # label node numbers
+        buffer = xmax/25
+        if node_numbers:
+            shift = np.array([buffer/4, -buffer/4])
+            for i, (xi,yi) in enumerate(zip(x, y)):
+                ax.text(xi + shift[0], yi + shift[1], str(i + 0), fontsize=10)
+        # normalized acceleration vector
+        if show_acc:
+            u = self.ahat[self.ID[0,:]]; v = self.ahat[self.ID[1,:]]
+            ax.quiver(x,y, u,v)
+        # plot reaction forces
+        if show_reac and any(self.in_contact()):
+            xreac = x[self.rhs_nodes]; yreac = y[self.rhs_nodes]
+            ureac = -self.Lhat; vreac = np.zeros_like(ureac)
+            ax.quiver(xreac,yreac, ureac,vreac, color='g')
+
+        # plot attributes
+        cbar = fig.colorbar(p)
+        els.set_clim(vmin=-9, vmax=9)
+        xmin = 0; xmax = self.L + 1 + 0.2; # [m]
+        ymin = 0; ymax = 0.2;
+        ax.set_xlim([xmin - buffer, xmax + buffer])
+        ax.set_ylim([ymin - buffer, ymax + buffer])
+        ax.set_xlabel(r"$x$")
+        ax.set_ylabel(r"$y$")
+        
+def positive_flatten(A):
+    n = np.shape(A)[0]
+    diag0 = np.diagonal(A, offset=0)
+    diag1 = np.concatenate([
+        np.concatenate([np.diagonal(A, offset=i), np.diagonal(A, offset=-n+i)]) 
+        for i in range(1,n) ])
+    return np.concatenate([diag0, diag1])
+
+def isPSD(A, tol=1e-8):
+    E = np.linalg.eigvalsh(A)
+    return np.all(E > -tol)
+
+def isSymmetric(A, tol=1e-8):
+    diff = A - A.T
+    return [norm(diff), np.all(diff < tol)]
+        
+        
+self = spatial_FEmesh(20,4, dt=0.001)
+
+# CFL condition
+dt_CFL = np.min([self.hx,self.hy])/np.sqrt((self.lam + 2*self.mu)/self.rho0)
+# self.dt = dt_CFL / 10.
+
+# constants in Newmark integration
+c1 = 1./(self.beta*self.dt*self.dt)
+c2 = (1-2*self.beta)/(2*self.beta)
+
+# initial velocity
+vbar = 10. # [m/s]
+T = 1. / vbar # [s]
+numt = round(T / self.dt * .1)
+# numt = 3
+
+# time steps
+# numt1 = round((1./vbar)/self.dt)
+
+# store solution info
+its = np.zeros(numt)
+
+# set initial velocity
+self.vhat[self.ID[0,:]] = vbar # [m/s]
+
+# track total energy
+energy_time = np.zeros(numt+1, dtype=float)
+energy_time[0] = self.total_energy()
+energy_norm_time = np.zeros(numt, dtype=float)
+
+# Fix to wall
+self.uhat[self.ID[0,:]] += 0.
+# self.vhat[self.rhs_dofs[0]] = 0.
+self.extended_solve()
+
+# wall contact
+for i in tqdm(range(0,11)):
+    # check contact condition
+#     self.update_contact()
+    # store values of dofs at time tn
+    self.un = np.copy(self.uhat)
+    self.vn = np.copy(self.vhat)
+    self.an = np.copy(self.ahat)
+    # N-R iterations
+    itmax = 10; it = 1;
+    tol = 1e-5; zero_tol = 1e-10
+    res = 1.; abs_err = 1.; energy_norm = 1.;
+    while (it <= itmax) and (res > tol or abs_err > tol):
+        # update acceleration
+        self.ahat = c1*(self.uhat-self.un-self.vn*self.dt)-c2*self.an
+        # form system and solve
+        du,dL,A = self.extended_solve()
+        # update variables
+        self.uhat += du
+        self.Lhat += dL
+        
+        # update contact condition
+        gap = self.g()
+        # loop through leading edge nodes
+        for j in range(0, self.numel_W + 1):
+            if (self.contact[j] == False) and (gap[j] < -zero_tol):
+                # global dof number
+                dof = self.rhs_dofs[0,j]
+                # activate contact condition
+                self.contact[j] = True
+                # undo iteration
+                self.uhat[dof] -= du[dof]
+                self.Lhat[j] -= dL[j]
+                # zero out velocity and set initial guess for position
+                self.un[dof] += self.g()[j]
+                self.uhat[dof] += self.g()[j]
+                self.vn[dof] = 0.
+                self.vhat[dof] = 0.
+                self.an[dof] = 0.
+                self.ahat[dof] = 0.
+            elif (self.contact[j] == True) and not(gap[j] < zero_tol and self.Lhat[j] > 0):
+                # deactivate contact
+                self.contact[j] = False
+                # undo iteration
+                self.uhat[dof] -= du[dof]
+                self.Lhat[j] -= dL[j]
+        
+        # update residual and iteration
+        abs_err = norm(du)
+        f = self.f()
+        res = norm(f[self.interior_dofs])
+        energy_norm = np.dot(du, f)
+        it += 1
+    
+    # report solution metrics
+    its[i] = it-1
+    energy_time[i+1] = self.total_energy()
+    energy_norm_time[i] = energy_norm
+    
+    # last acceleration update
+    self.ahat = c1*(self.uhat-self.un-self.vn*self.dt)-c2*self.an
+    # update velocity
+    self.vhat += ((1 - self.gamma)*self.an + self.gamma*self.ahat)*self.dt
+    
+    
+    # plot progress
+    #display.clear_output(wait=True)
+    #self.plot_defo(label_vertex=False, show_reac=True)
+    #display.display(plt.gcf())
+    #plt.close()
+    
+#     if any(self.Lhat<-100):
+#         print(self.Lhat)
+#         break
+    
+    # warn if max its reached
+    if it >= itmax:
+        warnings.warn("Maximum iterations reached during Newton-Raphson solve")
+        msg = "Final error is %f" % res
+        print(msg)
+
+    # increment time
+    self.t += self.dt
+
+# self.plot_defo(label_vertex=True)
+print(its)
+print(self.Lhat)
+print(energy_time)

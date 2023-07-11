@@ -1,0 +1,336 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Mar  9 11:24:56 2022
+
+@author: juanmeriles
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+import scipy.optimize as sc
+import copy
+
+nodesnat = np.array ([[0,0],
+                   [0,4],
+                   [0,8],
+                   [4,0],
+                   [4,4],
+                   [4,8],
+                   [8,0],
+                   [8,4],
+                   [8,8],
+                   [12,0],
+                   [12,4],
+                   [12,8]])
+
+nodes = np.array ([[0,0],
+                   [0,4],
+                   [0,8],
+                   [4,0],
+                   [5,3],
+                   [4,8],
+                   [8,0],
+                   [9,5],
+                   [8,8],
+                   [12,0],
+                   [12,4],
+                   [12,8]])
+
+con = np.array([[1,4,5,2],
+       [2,5,6,3],
+       [4,7,8,5],
+       [5,8,9,6],
+       [7,10,11,8],
+       [8,11,12,9]])
+
+boun = np.array([1,1,1,1,0,1,1,0,1,1,1,1])
+
+class element:
+    NODE = []
+    CON = []
+    BOUN = []
+    id_v = []
+    
+    def __init__(self):
+        pass
+    
+        
+def ShapeFcn(e,n):
+    N1 = 1/4*(1-e)*(1-n)
+    N2 = 1/4*(1+e)*(1-n)
+    N3 = 1/4*(1+e)*(1+n)
+    N4 = 1/4*(1-e)*(1+n)
+    N = np.array([[N1,0,N2,0,N3,0,N4,0],
+                  [0,N1,0,N2,0,N3,0,N4]])
+    Nsmall = np.array([[N1,N2,N3,N4]])
+    return N, Nsmall
+    
+    
+    
+def Jacobian(e,n,el):
+    dxde = 1/4*(-(1-n)*el.NODE[0][0]+(1-n)*el.NODE[1][0]+(1+n)*el.NODE[2][0]-(1+n)*el.NODE[3][0])
+    dyde = 1/4*(-(1-n)*el.NODE[0][1]+(1-n)*el.NODE[1][1]+(1+n)*el.NODE[2][1]-(1+n)*el.NODE[3][1])
+    dxdn = 1/4*(-(1-e)*el.NODE[0][0]-(1+e)*el.NODE[1][0]+(1+e)*el.NODE[2][0]+(1-e)*el.NODE[3][0])
+    dydn = 1/4*(-(1-e)*el.NODE[0][1]-(1+e)*el.NODE[1][1]+(1+e)*el.NODE[2][1]+(1-e)*el.NODE[3][1])
+    
+    J = np.array([[dxde,dyde],
+                  [dxdn,dydn]])
+    return J
+    
+def plotElements(inputNodes,CON,color):
+    for j in range(len(CON)):
+        y = []
+        x = []
+        for i in range(len(CON[0])):
+            x.append(inputNodes[CON[j][i]-1][0])
+            y.append(inputNodes[CON[j][i]-1][1])
+        x.append(x[0])
+        y.append(y[0])
+        plt.plot(x,y,color)
+        
+def func(nap,x,el):
+    N1 = 1/4*(1-nap[0])*(1-nap[1])
+    N2 = 1/4*(1+nap[0])*(1-nap[1])
+    N3 = 1/4*(1+nap[0])*(1+nap[1])
+    N4 = 1/4*(1-nap[0])*(1+nap[1])
+    N = np.array([[N1,0,N2,0,N3,0,N4,0],
+                  [0,N1,0,N2,0,N3,0,N4]])
+    return (N@el.nodeVec.T).flatten()-x
+
+def whichel(x,y):
+    if x<=4 and y<=4:
+        inel = 1
+    elif x<=4 and y<=8:
+        inel = 2
+    elif x<=8 and y<=4:
+        inel = 3
+    elif x<=8 and y<=8:
+        inel = 4
+    elif x<=12 and y<=4:
+        inel = 5
+    elif x<=12 and y<=8:
+        inel = 6
+    else:
+        inel = -1
+        print('error')
+    return inel
+
+#def GaussInt():
+el_og = []
+el_trans = []
+numel = len(con)
+for i in range(numel):
+    el_og.insert(i,element())
+    el_og[i].NODE = np.array([nodesnat[con[i][0]-1],nodesnat[con[i][1]-1],nodesnat[con[i][2]-1],nodesnat[con[i][3]-1]])
+    el_og[i].CON = con[i]
+    el_og[i].BOUN = np.array([boun[con[i][0]-1],boun[con[i][1]-1],boun[con[i][2]-1],boun[con[i][3]-1]])
+    el_og[i].nodeVec = np.array([[el_og[i].NODE[0][0],el_og[i].NODE[0][1],el_og[i].NODE[1][0],el_og[i].NODE[1][1],\
+                                 el_og[i].NODE[2][0],el_og[i].NODE[2][1],el_og[i].NODE[3][0],el_og[i].NODE[3][1]]])
+    
+for i in range(numel):
+    el_trans.insert(i,element())
+    el_trans[i].NODE = np.array([nodes[con[i][0]-1],nodes[con[i][1]-1],nodes[con[i][2]-1],nodes[con[i][3]-1]])
+    el_trans[i].CON = con[i]
+    el_trans[i].BOUN = np.array([boun[con[i][0]-1],boun[con[i][1]-1],boun[con[i][2]-1],boun[con[i][3]-1]])
+
+za = np.array([1,1,1,1,1,1,1,1,1,1,1,1])
+zb = np.array([0,8,16,4,12,20,8,16,24,12,20,28])
+zc = np.array([2,8,-7,6,-1,1,3,-2,4,-4,-3,0])
+
+globalGaussPointsx_og = []
+globalGaussPointsy_og = []
+globalGaussPointsx_trans = []
+globalGaussPointsy_trans = []
+A = np.zeros((12,12))
+b1 = np.zeros((12,1))
+b2 = np.zeros((12,1))
+b3 = np.zeros((12,1))
+count = 0
+
+for i in range(numel):
+    gaussPoints = [-np.sqrt(3/5),0,np.sqrt(3/5)]
+    w = [5/9,8/9,5/9]
+    for j in range(len(w)):
+        for k in range(len(w)):
+            nodeVec_og = np.array([[el_og[i].NODE[0][0],el_og[i].NODE[0][1],el_og[i].NODE[1][0],el_og[i].NODE[1][1],\
+                                 el_og[i].NODE[2][0],el_og[i].NODE[2][1],el_og[i].NODE[3][0],el_og[i].NODE[3][1]]])
+            nodeVec_trans = np.array([[el_trans[i].NODE[0][0],el_trans[i].NODE[0][1],el_trans[i].NODE[1][0],el_trans[i].NODE[1][1],\
+                                       el_trans[i].NODE[2][0],el_trans[i].NODE[2][1],el_trans[i].NODE[3][0],el_trans[i].NODE[3][1]]]) 
+                
+            N_og, Nsmall_og = ShapeFcn(gaussPoints[j],gaussPoints[k])
+            N_trans, Nsmall_trans = ShapeFcn(gaussPoints[j],gaussPoints[k])
+            globalGaussPointsx_og.append((N_og @ nodeVec_og.T)[0])
+            globalGaussPointsy_og.append((N_og @ nodeVec_og.T)[1])
+            globalGaussPointsx_trans.append((N_trans @ nodeVec_trans.T)[0])
+            globalGaussPointsy_trans.append((N_trans @ nodeVec_trans.T)[1])
+            
+            J_trans = np.linalg.det(Jacobian(gaussPoints[j],gaussPoints[k],el_trans[i]))
+            
+            gp_global = [globalGaussPointsx_trans[count][0],globalGaussPointsy_trans[count][0]]
+            zel1 = 1
+            zel2 = globalGaussPointsx_trans[count]+2*globalGaussPointsy_trans[count]
+            #which element are we in
+            inel = whichel(globalGaussPointsx_trans[count],globalGaussPointsy_trans[count])
+            #print(inel)
+            #find natural coords of gp
+            guess = np.array([0,0])
+            natcoords = sc.fsolve(func,guess,(gp_global,el_og[inel-1]))
+            #print(gp_global)
+            #get interpolated values
+            ztemp = np.array([[zc[con[inel-1][0]-1],zc[con[inel-1][1]-1],zc[con[inel-1][2]-1],zc[con[inel-1][3]-1]]])
+            #print(inel)
+            #print(natcoords)
+            #print(ztemp)
+            SFtemp,SFtempsmall = ShapeFcn(natcoords[0],natcoords[1])
+            zel3 = SFtempsmall @ ztemp.T
+            
+            count = count+1
+            Atemp = Nsmall_trans.T@ Nsmall_trans
+            btemp1 = (Nsmall_trans * zel1).flatten()
+            btemp2 = (Nsmall_trans * zel2).flatten()
+            btemp3 = (Nsmall_trans * zel3).flatten()
+            for n in range(len(Atemp)):
+                b1[con[i][n]-1] = b1[con[i][n]-1] + w[j]*w[k]* btemp1[n]*J_trans
+                b2[con[i][n]-1] = b2[con[i][n]-1] + w[j]*w[k]* btemp2[n]*J_trans
+                b3[con[i][n]-1] = b3[con[i][n]-1] + w[j]*w[k]* btemp3[n]*J_trans
+                for p in range(len(Atemp[0])):
+                    A[con[i][n]-1][con[i][p]-1] = A[con[i][n]-1][con[i][p]-1] + J_trans*w[j]*w[k]*Atemp[n][p]
+                    
+                    
+#Solve least squares
+z_neg1 = np.linalg.solve(A,b1)
+z_neg2 = np.linalg.solve(A,b2)
+z_neg3 = np.linalg.solve(A,b3)
+
+#Grab the z on corresponding natural coords
+centerNodes = np.array([[5,3],
+                        [9,5]])
+zcentera = [1,1]
+zcenterb = [0,0]
+zcenterc = [0,0]
+
+for i in range(len(centerNodes)):
+    inel = whichel(centerNodes[i][0],centerNodes[i][1])
+    guess = np.array([0,0])
+    natcoords = sc.fsolve(func,guess,(gp_global,el_og[inel-1]))
+    ztemp = np.array([[zc[con[inel-1][0]-1],zc[con[inel-1][1]-1],zc[con[inel-1][2]-1],zc[con[inel-1][3]-1]]])
+    SFtemp,SFtempsmall = ShapeFcn(natcoords[0],natcoords[1])
+    zcenterb[i] = centerNodes[i][0]+2*centerNodes[i][1]
+    zcenterc[i] = SFtempsmall @ ztemp.T
+
+zcola = np.array([1,1,1,1,zcentera[0],1,1,zcentera[1],1,1,1,1])
+zcolb = np.array([0,8,16,4,zcenterb[0],20,8,zcenterb[1],24,12,20,28])
+zcolc = np.array([2,8,-7,6,zcenterc[0][0][0],1,3,zcenterc[1][0][0],4,-4,-3,0])
+
+twonorm_project_a = 0
+twonorm_project_b = 0
+twonorm_project_c = 0
+twonorm_colloc_a = 0
+twonorm_colloc_b = 0
+twonorm_colloc_c = 0
+
+for i in range(numel):
+    gaussPoints = [-np.sqrt(3/5),0,np.sqrt(3/5)]
+    w = [5/9,8/9,5/9]
+    for j in range(len(w)):
+        for k in range(len(w)):
+            nodeVec_og = np.array([[el_og[i].NODE[0][0],el_og[i].NODE[0][1],el_og[i].NODE[1][0],el_og[i].NODE[1][1],\
+                                 el_og[i].NODE[2][0],el_og[i].NODE[2][1],el_og[i].NODE[3][0],el_og[i].NODE[3][1]]])
+            nodeVec_trans = np.array([[el_trans[i].NODE[0][0],el_trans[i].NODE[0][1],el_trans[i].NODE[1][0],el_trans[i].NODE[1][1],\
+                                       el_trans[i].NODE[2][0],el_trans[i].NODE[2][1],el_trans[i].NODE[3][0],el_trans[i].NODE[3][1]]]) 
+                
+            N_og, Nsmall_og = ShapeFcn(gaussPoints[j],gaussPoints[k])
+            N_trans, Nsmall_trans = ShapeFcn(gaussPoints[j],gaussPoints[k])
+            globalGaussPointsx_og.append((N_og @ nodeVec_og.T)[0])
+            globalGaussPointsy_og.append((N_og @ nodeVec_og.T)[1])
+            globalGaussPointsx_trans.append((N_trans @ nodeVec_trans.T)[0])
+            globalGaussPointsy_trans.append((N_trans @ nodeVec_trans.T)[1])
+            
+            J_trans = np.linalg.det(Jacobian(gaussPoints[j],gaussPoints[k],el_trans[i]))
+            
+            gp_global = [globalGaussPointsx_trans[count][0],globalGaussPointsy_trans[count][0]]
+            zel1_true = 1
+            zel2_true = globalGaussPointsx_trans[count]+2*globalGaussPointsy_trans[count]
+            #which element are we in
+            inel = whichel(globalGaussPointsx_trans[count],globalGaussPointsy_trans[count])
+            #print(inel)
+            #find natural coords of gp
+            guess = np.array([0,0])
+            natcoords = sc.fsolve(func,guess,(gp_global,el_og[inel-1]))
+            #print(gp_global)
+            #get interpolated values
+            ztemp = np.array([[zc[con[inel-1][0]-1],zc[con[inel-1][1]-1],zc[con[inel-1][2]-1],zc[con[inel-1][3]-1]]])
+            #print(inel)
+            #print(natcoords)
+            #print(ztemp)
+            SFtemp,SFtempsmall = ShapeFcn(natcoords[0],natcoords[1])
+            zel3_true = SFtempsmall @ ztemp.T
+            
+            #projected z at gauss point
+            ztempa = np.array([[z_neg1[con[i][0]-1],z_neg1[con[i][1]-1],z_neg1[con[i][2]-1],z_neg1[con[i][3]-1]]])
+            ztempb = np.array([[z_neg2[con[i][0]-1],z_neg2[con[i][1]-1],z_neg2[con[i][2]-1],z_neg2[con[i][3]-1]]])
+            ztempc = np.array([[z_neg3[con[i][0]-1],z_neg3[con[i][1]-1],z_neg3[con[i][2]-1],z_neg3[con[i][3]-1]]])
+            zgpap = (Nsmall_trans @ ztempa.T)[0][0][0]
+            #print(zgpap)
+            zgpbp = (Nsmall_trans @ ztempb.T)[0][0][0]
+            zgpcp = (Nsmall_trans @ ztempc.T)[0][0][0]
+            
+            #Collocated z at gauss point
+            ztempa = np.array([[zcola[con[i][0]-1],zcola[con[i][1]-1],zcola[con[i][2]-1],zcola[con[i][3]-1]]])
+            ztempb = np.array([[zcolb[con[i][0]-1],zcolb[con[i][1]-1],zcolb[con[i][2]-1],zcolb[con[i][3]-1]]])
+            ztempc = np.array([[zcolc[con[i][0]-1],zcolc[con[i][1]-1],zcolc[con[i][2]-1],zcolc[con[i][3]-1]]])
+            zgpac = (Nsmall_trans @ ztempa.T)[0][0]
+            zgpbc = (Nsmall_trans @ ztempb.T)[0][0]
+            zgpcc = (Nsmall_trans @ ztempc.T)[0][0]
+            
+            twonorm_project_a += ((zgpap-zel1_true)**2)*w[j]*w[k]*J_trans
+            twonorm_project_b += ((zgpbp-zel2_true)**2)*w[j]*w[k]*J_trans
+            twonorm_project_c += ((zgpcp-zel3_true)**2)*w[j]*w[k]*J_trans
+            twonorm_colloc_a += ((zgpac-zel1_true)**2)*w[j]*w[k]*J_trans
+            twonorm_colloc_b += ((zgpbc-zel2_true)**2)*w[j]*w[k]*J_trans
+            twonorm_colloc_c += ((zgpcc-zel3_true)**2)*w[j]*w[k]*J_trans
+
+twonorm_project_a = np.sqrt(twonorm_project_a)
+twonorm_project_b = np.sqrt(twonorm_project_b)
+twonorm_project_c = np.sqrt(twonorm_project_c)
+
+twonorm_colloc_a = np.sqrt(twonorm_colloc_a)
+twonorm_colloc_b = np.sqrt(twonorm_colloc_b)
+twonorm_colloc_c = np.sqrt(twonorm_colloc_c)
+
+
+
+    
+    
+    
+ 
+# zmesh1og = np.hstack(zmesh1og)
+# zmesh2og = np.hstack(zmesh2og)
+# zmesh3og = np.hstack(zmesh3og)
+# zmesh1trans = np.hstack(zmesh1trans).flatten()
+# zmesh2trans = np.hstack(zmesh2trans).flatten()
+# zmesh3trans = np.hstack(zmesh3trans).flatten()
+# x1 = np.hstack(x1)
+# y1 = np.hstack(y1)
+# ax = plt.axes(projection = '3d')       
+# #x1 = np.array(x1)    
+# #x2 = np.array(x2)   
+# ax.plot_trisurf(x1,y1,zmesh2og)
+# ax.plot_trisurf(x2,y2,zmesh2trans)
+
+#plt.plot(x1,y1,'o')
+#plt.plot(x2,y2,'o')
+    
+
+    
+
+                                 
+plotElements(nodesnat,con,'b')
+#plt.plot(globalGaussPointsx_og,globalGaussPointsy_og,'o')   
+
+#plt.figure(2)
+#plotElements(nodes,con,'b')
+#plt.plot(globalGaussPointsx_trans,globalGaussPointsy_trans,'o')   
+    
+                  

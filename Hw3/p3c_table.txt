@@ -1,0 +1,8 @@
+\begin{tabular}{rrrrrrrrr}
+\toprule
+ \# \textbackslash Delta t &  u\_\{2 1\}\textasciicircum e &  u\_\{2 2\}\textasciicircum e &  v\_\{2 1\}\textasciicircum e &  v\_\{2 2\}\textasciicircum e &  u\_\{3 1\}\textasciicircum e &  u\_\{3 2\}\textasciicircum e &  v\_\{3 1\}\textasciicircum e &  v\_\{3 2\}\textasciicircum e \\
+\midrule
+    0.00001 &        0.0 &        0.0 &   0.000001 &  -0.000111 &        0.0 &        0.0 &   0.000002 &  -0.000222 \\
+    0.00002 &        0.0 &        0.0 &   0.000000 &   0.000000 &        0.0 &        0.0 &   0.000000 &   0.000000 \\
+\bottomrule
+\end{tabular}

@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Mar  9 11:24:56 2022
+
+@author: juanmeriles
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+import scipy.optimize as sc
+import copy
+
+nodes = np.array ([[0,0],
+                   [0,4],
+                   [0,8],
+                   [0,12],
+                   [4,0],
+                   [5,5],
+                   [3,9],
+                   [4,12],
+                   [8,0],
+                   [7,4],
+                   [9,7],
+                   [8,12],
+                   [12,0],
+                   [13,3],
+                   [11,8],
+                   [12,12],
+                   [16,0],
+                   [16,4],
+                   [16,8],
+                   [16,12]])
+
+CON = np.array([[1,2,6,5],
+       [2,3,7,6],
+       [3,4,8,7],
+       [5,6,10,9],
+       [6,7,11,10],
+       [7,8,12,11],
+       [9,10,14,13],
+       [10,11,15,14],
+       [11,12,16,15],
+       [13,14,18,17],
+       [14,15,19,18],
+       [15,16,20,19]])
+
+BOUN = np.array([1,1,1,1,1,0,0,1,1,0,0,1,1,0,0,1,1,1,1,1])
+
+def MeanRemap(nodesMean,CON,BOUN):
+    newnodes = []
+    for i in range(len(nodesMean)):
+        surel = []
+        if BOUN[i] == 1:
+            newnodes.append(nodesMean[i])
+        else:
+            for j in range(len(CON)):
+                for k in range(len(CON[0])):
+                    if (CON[j][k] == i+1):
+                        
+                        surel.append(np.delete(CON[j],k))
+            surnodes = np.zeros(8)
+            count = 0
+            for j in range(len(surel)):
+                for k in range(len(surel[0])):
+                    if (surel[j][k] not in surnodes):
+                        surnodes[count] = surel[j][k]
+                        count = count+1
+            
+            newx = 0
+            newy = 0
+            for j in range(len(surnodes)):
+
+                newx = newx+nodesMean[int(surnodes[j])-1][0]
+                newy = newy+nodesMean[int(surnodes[j])-1][1]
+            newx = newx/len(surnodes)
+            newy = newy/len(surnodes)
+            #nodesMean[i][0] = newx
+            #nodesMean[i][1] = newy
+            newnodes.append(np.array([newx,newy]))
+    newnodes = np.vstack(newnodes)
+                              
+    return newnodes   
+def PoisEqs(node,x,y):
+    xe = 1/2*(x[7]-x[3])
+    xn = 1/2*(x[1]-x[5])
+    xee = x[7]-2*node[0]+x[3]
+    xnn = x[1]-2*node[0]+x[5]
+    xen = (1/4)*(x[0]+x[4]-x[6]-x[2])
+    
+    ye = 1/2*(y[7]-y[3])
+    yn = 1/2*(y[1]-y[5])
+    yee = y[7]-2*node[1]+y[3]
+    ynn = y[1]-2*node[1]+y[5]
+    yen = (1/4)*(y[0]+y[4]-y[6]-y[2])
+    
+    alpha = xn**2+yn**2
+    beta = xe*xn+ye*yn
+    gamma = xe**2+ye**2
+    
+    f1 = alpha*xee-2*beta*xen+gamma*xnn
+    f2 = alpha*yee-2*beta*yen+gamma*ynn
+    
+    return [f1,f2]
+    
+def PoissonRemap(nodesPois,CON,BOUN):
+    newnodes = []
+    nodesPois = nodesPois.astype('float')
+    for i in range(len(nodesPois)):
+
+        surel = []
+        if BOUN[i] == 1:
+            newnodes.append(nodesPois[i])
+        else:
+            surnodes = np.zeros(8)
+            for j in range(len(CON)):
+                 for k in range(len(CON[0])):
+                     if (CON[j][k] == i+1):
+
+                         surel.append(CON[j])
+                         if k==0:
+                             surnodes[0] = CON[j][2]
+                             surnodes[1] = CON[j][1]
+                             surnodes[7] = CON[j][3]
+                         if k==1:
+                             surnodes[5] = CON[j][0]
+                             surnodes[6] = CON[j][3]
+                         if k==2:
+                             surnodes[3] = CON[j][1]
+                             surnodes[4] = CON[j][0]
+                         if k==3:
+                             surnodes[2] = CON[j][1]
+                             
+            node = [nodesPois[i][0],nodesPois[i][1]]
+            
+            surnodes = surnodes - np.ones(len(surnodes))
+            #print(surnodes)
+            x = nodesPois[surnodes.astype(int)].T[0]
+            y = nodesPois[surnodes.astype(int)].T[1]
+            
+            [xnew,ynew] = sc.fsolve(PoisEqs,node,(x,y))
+            nodesPois[i][0] = xnew
+            nodesPois[i][1] = ynew
+
+            newnodes.append(np.array([xnew,ynew])) 
+    newnodes = np.vstack(newnodes)                
+    return newnodes   
+
+def plotElements(inputNodes,CON,color):
+    for j in range(len(CON)):
+        y = []
+        x = []
+        for i in range(len(CON[0])):
+            x.append(inputNodes[CON[j][i]-1][0])
+            y.append(inputNodes[CON[j][i]-1][1])
+        x.append(x[0])
+        y.append(y[0])
+        plt.plot(x,y,color)
+
+
+plotElements(nodes,CON,'b')
+
+meanNodes = copy.copy(nodes)
+#print(nodes)
+poisNodes = copy.copy(nodes)
+nodestrue = np.array ([[0,0],
+                   [0,4],
+                   [0,8],
+                   [0,12],
+                   [4,0],
+                   [4,4],
+                   [4,8],
+                   [4,12],
+                   [8,0],
+                   [8,4],
+                   [8,8],
+                   [8,12],
+                   [12,0],
+                   [12,4],
+                   [12,8],
+                   [12,12],
+                   [16,0],
+                   [16,4],
+                   [16,8],
+                   [16,12]])
+
+errorMean = []
+errorPois = []
+for i in range(25):
+    meanNodes = MeanRemap(meanNodes,CON,BOUN)
+    poisNodes = PoissonRemap(poisNodes,CON,BOUN)
+    
+    errorMean.append(np.linalg.norm(meanNodes-nodestrue,2))
+    errorPois.append(np.linalg.norm(poisNodes-nodestrue,2))
+    
+
+plotElements(meanNodes,CON,'r')
+
+plotElements(poisNodes,CON,'g')
+
+plt.figure(2)
+plt.plot(errorMean,label = 'Neighbor Average')
+plt.plot(errorPois, label = 'Poisson Smoothing')
+plt.legend()
+
+##
+
+
+    
+                  
